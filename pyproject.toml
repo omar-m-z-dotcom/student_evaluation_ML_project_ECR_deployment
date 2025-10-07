@@ -1,0 +1,36 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=42", "wheel"]
+
+[project]
+authors = [
+  {name = "Omar Mohamed", email = "triro765@gmail.com"},
+] 
+dependencies = [
+  "pandas",
+  "numpy",
+  "seaborn",
+  "matplotlib",
+  "kagglehub",
+  "scikit-learn",
+  "catboost",
+  "xgboost",
+  "optuna",
+  "Flask",
+] 
+description = "in this project we use the data provided to estimate what would be the student's grad in (Reading, Writing and Math)" 
+name = "student_marks_predictor" 
+readme = "README.md" 
+requires-python = ">=3.8" # Specify your Python version requirement
+version = "0.0.1" 
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=6.0.0",
+  "black",
+]
+
+[tool.setuptools]
+include-package-data = true
+# Let setuptools find everything
+packages = {find = {}}
