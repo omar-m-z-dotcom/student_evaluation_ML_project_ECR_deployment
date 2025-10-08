@@ -1,133 +1,86 @@
-name: Deploy to Amazon ECS
+name: workflow
 
 on:
   push:
-    branches: ["main"]
+    branches:
+      - main
     paths-ignore:
       - "README.md"
-      - "*.md"
-
-env:
-  AWS_REGION: MY_AWS_REGION
-  ECR_REPOSITORY: MY_ECR_REPOSITORY
-  ECS_SERVICE: MY_ECS_SERVICE
-  ECS_CLUSTER: MY_ECS_CLUSTER
-  ECS_TASK_DEFINITION: MY_ECS_TASK_DEFINITION
-  CONTAINER_NAME: MY_CONTAINER_NAME
 
 permissions:
+  id-token: write
   contents: read
 
 jobs:
   integration:
-    name: Integration Tests
+    name: Continuous Integration
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.9"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
-      - name: Run tests
-        run: |
-          # Add your test commands here
-          echo "Running integration tests"
-          # pytest tests/ or any other test command
+      - name: Checkout Code
+        uses: actions/checkout@v3
+      - name: Lint code
+        run: echo "Linting repository"
+      - name: Run unit tests
+        run: echo "Running unit tests"
 
   build-and-push-ecr-image:
-    name: Build and Push to ECR
+    name: Continuous Delivery
     needs: integration
     runs-on: ubuntu-latest
-    environment: production
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
+      - name: Checkout Code
+        uses: actions/checkout@v3
+      - name: Install Utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
+          aws-region: ${{ secrets.AWS_REGION }}
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
-
       - name: Build, tag, and push image to Amazon ECR
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
+          IMAGE_TAG: latest
         run: |
+          # Build a docker container and
+          # push it to ECR so that it can
+          # be deployed to ECS.
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-    outputs:
-      image: ${{ steps.build-image.outputs.image }}
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-  continuous-deployment:
-    name: Deploy to ECS
+  Continuous-Deployment:
     needs: build-and-push-ecr-image
-    runs-on: ubuntu-latest
-    environment: production
+    runs-on: self-hosted
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@v3
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Fill in the new image ID in the Amazon ECS task definition
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: ${{ env.ECS_TASK_DEFINITION }}
-          container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ needs.build-and-push-ecr-image.outputs.image }}
-
-      - name: Deploy Amazon ECS task definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: Clean up old images
-        if: success()
-        env:
-          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
-          AWS_REGION: ${{ env.AWS_REGION }}
-          KEEP_IMAGES: 5 # Keep the 5 most recent images
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Pull latest images
         run: |
-          # Get list of image digests sorted by date
-          IMAGES=$(aws ecr describe-images --repository-name $ECR_REPOSITORY --region $AWS_REGION --query 'sort_by(imageDetails,& imagePushedAt)[*].imageDigest' --output json)
-
-          # Calculate how many images to delete
-          COUNT=$(echo $IMAGES | jq length)
-          DELETE_COUNT=$((COUNT - KEEP_IMAGES))
-
-          # Delete older images if we have more than we want to keep
-          if [ $DELETE_COUNT -gt 0 ]; then
-            echo "Deleting $DELETE_COUNT old images"
-            IMAGES_TO_DELETE=$(echo $IMAGES | jq '.[:'"$DELETE_COUNT"']')
-            for digest in $(echo $IMAGES_TO_DELETE | jq -r '.[]'); do
-              aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --region $AWS_REGION --image-ids imageDigest=$digest
-              echo "Deleted image: $digest"
-            done
-          else
-            echo "No images to delete"
-          fi
+          docker pull ${{secrets.AWS_ECR_LOGIN_URI}}/${{ secrets.ECR_REPOSITORY_NAME }}:latest
+      # - name: Stop and remove  container if running
+      #   run: |
+      #    docker ps -q --filter "name=mltest" | grep -q . && docker stop mltest && docker rm -fv mltest
+      - name: Run Docker Image to serve users
+        run: |
+          docker run -d -p 8080:8080 --ipc="host" --name=mltest -e 'AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}' -e 'AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}' -e 'AWS_REGION=${{ secrets.AWS_REGION }}'  ${{secrets.AWS_ECR_LOGIN_URI}}/${{ secrets.ECR_REPOSITORY_NAME }}:latest
+      - name: Clean previous images and containers
+        run: |
+          docker system prune -f
